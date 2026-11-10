@@ -41,6 +41,22 @@
   .actionbar .btn{width:auto;flex:1;min-width:140px;}
   .filehidden{display:none;}
   .counter{font-size:13px;color:#5b6560;margin-top:4px;}
+  .proyblock{border:1px solid var(--line);border-radius:12px;padding:11px;margin-bottom:10px;background:#fffefb;}
+  .proyblock h3{margin:0 0 8px;font-size:15px;color:var(--teal-dark);}
+  .proyblock .lbl{font-size:13px;color:#5b6560;font-weight:600;margin:10px 0 5px;}
+  .chips{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;}
+  .chip{border:1.5px solid var(--line);background:#fff;color:var(--ink);border-radius:9px;padding:7px 1px;font-size:13px;font-weight:700;text-align:center;cursor:pointer;line-height:1.2;min-height:46px;font-family:inherit;}
+  .chip small{display:block;font-weight:600;font-size:11px;color:#7a8079;}
+  .chip.na{background:var(--no);border-color:var(--no);color:#fff;}
+  .chip.na small{color:#fff;}
+  .chip{min-width:0;}
+  .chip.ok{border-color:var(--ok);color:var(--ok);}
+  .chip.ok small{color:var(--ok);}
+  .chip:disabled{opacity:.45;cursor:default;}
+  .resumenNA{font-size:13.5px;margin-top:9px;padding:8px 10px;border-radius:9px;background:#fbecd4;color:#7a5410;}
+  .resumenNA.ninguno{background:#e2f1e6;color:var(--ok);}
+  details.extradias{margin-top:9px;}
+  details.extradias summary{font-size:13px;font-weight:600;color:var(--teal-dark);cursor:pointer;}
 </style>
 </head>
 <body>
@@ -96,7 +112,9 @@ const DEFAULT_LOCS = [
 
 let STATE = {
   periodo:{mes:"Julio",fechaInicioISO:"2026-07-13",fechaFinalISO:"2026-07-19",anio:2026,proyecto:"MCKINSEY",encargado:"Lilliana Retana"},
-  locs: DEFAULT_LOCS.map(r=>({generar:r[0],archivo:r[1],tipo:r[2],proyecto:r[3],encargado:r[4],area:r[5]}))
+  locs: DEFAULT_LOCS.map(r=>({generar:r[0],archivo:r[1],tipo:r[2],proyecto:r[3],encargado:r[4],area:r[5]})),
+  habituales: {"MCKINSEY":[6]},
+  excepciones: {}
 };
 
 function isoToDDMMYYYY(iso){
@@ -113,6 +131,8 @@ function loadState(){
       const parsed = JSON.parse(raw);
       if(parsed.periodo) STATE.periodo = parsed.periodo;
       if(parsed.locs) STATE.locs = parsed.locs;
+      if(parsed.habituales) STATE.habituales = parsed.habituales;
+      if(parsed.excepciones) STATE.excepciones = parsed.excepciones;
     }
   }catch(e){}
 }
@@ -178,6 +198,222 @@ function b64ToBytes(b64){
   return bytes;
 }
 
+/* ---------- DIAS QUE NO APLICAN ---------- */
+const DIAS = ['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo'];
+const DIAS_CORTO = ['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'];
+const WNS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+let diasNaProys = [];
+
+function normProy(s){ return String(s||'').trim().toUpperCase(); }
+function projOf(loc){ return (loc.proyecto || STATE.periodo.proyecto || '').trim(); }
+function parseISO(iso){
+  const m = String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? new Date(+m[1], +m[2]-1, +m[3]) : null;
+}
+function toISO(d){
+  const p = n=>String(n).padStart(2,'0');
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());
+}
+function fmtDM(d){ return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0'); }
+// fecha de cada día de la semana (0=Lunes) dentro del periodo; null si el periodo no lo incluye
+function fechasSemana(){
+  const out = [null,null,null,null,null,null,null];
+  const ini = parseISO(STATE.periodo.fechaInicioISO);
+  if(!ini) return out;
+  const fin = parseISO(STATE.periodo.fechaFinalISO);
+  const last = (fin && fin>=ini) ? fin : new Date(ini.getFullYear(), ini.getMonth(), ini.getDate()+6);
+  for(let i=0;i<7;i++){
+    const d = new Date(ini.getFullYear(), ini.getMonth(), ini.getDate()+i);
+    if(d>last) break;
+    const w = (d.getDay()+6)%7;
+    if(!out[w]) out[w] = d;
+  }
+  return out;
+}
+function habitualesDe(proy){ return STATE.habituales[normProy(proy)] || []; }
+function esNAsemana(proy, w, fechas){
+  let na = habitualesDe(proy).indexOf(w) >= 0;
+  const d = fechas[w];
+  if(d){
+    const k = normProy(proy)+'|'+toISO(d);
+    if(Object.prototype.hasOwnProperty.call(STATE.excepciones, k)) na = !!STATE.excepciones[k];
+  }
+  return na;
+}
+function diasNAde(loc){
+  const fechas = fechasSemana(), proy = projOf(loc), set = new Set();
+  for(let w=0; w<7; w++) if(esNAsemana(proy, w, fechas)) set.add(w);
+  (loc.diasNA||[]).forEach(w=>set.add(w));
+  const ov = loc.diasOv || {};
+  Object.keys(ov).forEach(k=>{ if(ov[k]===true) set.add(+k); else if(ov[k]===false) set.delete(+k); });
+  return set;
+}
+function nCambios(loc){ return Object.keys(loc.diasOv||{}).length + (loc.diasNA||[]).length; }
+// estado de un día en la locación: undefined = sigue al proyecto, true = NA, false = Aplica
+function pasarEstadoLoc(loc, w){
+  loc.diasOv = loc.diasOv || {};
+  loc.diasNA = (loc.diasNA||[]).filter(x=>x!==w);
+  const cur = loc.diasOv[w];
+  if(cur===undefined) loc.diasOv[w] = true;
+  else if(cur===true) loc.diasOv[w] = false;
+  else delete loc.diasOv[w];
+}
+function chipLoc(loc, idx, w){
+  const v = (loc.diasOv||{})[w], legacy = (loc.diasNA||[]).indexOf(w)>=0;
+  const est = legacy ? true : v;
+  const cls = est===true ? ' na' : (est===false ? ' ok' : '');
+  const txt = est===true ? 'NA' : (est===false ? 'Aplica' : 'Igual');
+  return `<button type="button" class="chip l-dia${cls}" data-idx="${idx}" data-w="${w}">${DIAS_CORTO[w]}<small>${txt}</small></button>`;
+}
+
+function renderDiasNA(){
+  const box = document.getElementById('diasNaBox');
+  if(!box) return;
+  const proys = [], vistos = new Set();
+  STATE.locs.filter(l=>l.generar==='SI').forEach(l=>{
+    const p = projOf(l), k = normProy(p);
+    if(!vistos.has(k)){ vistos.add(k); proys.push(p); }
+  });
+  diasNaProys = proys;
+  if(!proys.length){ box.innerHTML = '<div class="hint">Marca al menos una locación para generar.</div>'; return; }
+  const fechas = fechasSemana();
+  box.innerHTML = '<div class="hint" style="margin:0 0 10px">Tú decides cada día. Un día NA sale con NA en todo el día, incluido el cuadro de firmas. Un día que aplica sale sin NA sueltos. Los NA propios del formulario, como Cambio de alfombra, no se tocan.</div>' +
+    proys.map((p,pi)=>{
+      const hab = habitualesDe(p);
+      const chipsHab = DIAS_CORTO.map((n,w)=>{
+        const on = hab.indexOf(w)>=0;
+        return `<button type="button" class="chip${on?' na':''}" data-p="${pi}" data-w="${w}" data-kind="hab" aria-pressed="${on}">${n}<small>${on?'NA':'Aplica'}</small></button>`;
+      }).join('');
+      const nas = [];
+      const chipsSem = DIAS_CORTO.map((n,w)=>{
+        const d = fechas[w], na = esNAsemana(p, w, fechas);
+        if(na) nas.push(DIAS[w] + (d?' '+fmtDM(d):''));
+        return `<button type="button" class="chip${na?' na':''}" data-p="${pi}" data-w="${w}" data-kind="sem" aria-pressed="${na}" ${d?'':'disabled'}>${n}<small>${d?fmtDM(d):'--'}</small><small>${na?'NA':'Aplica'}</small></button>`;
+      }).join('');
+      const resumen = nas.length
+        ? `<div class="resumenNA">NA en: ${esc(nas.join(', '))}. Los demás días aplican.</div>`
+        : `<div class="resumenNA ninguno">Todos los días aplican esta semana. No se escribe NA en ningún día.</div>`;
+      return `<div class="proyblock"><h3>${esc(p||'(sin nombre de proyecto)')}</h3>
+        <div class="lbl">Siempre sin servicio en este proyecto</div><div class="chips">${chipsHab}</div>
+        <div class="lbl">Esta semana: toca un día para marcarlo NA (feriado) o para quitarlo</div><div class="chips">${chipsSem}</div>
+        ${resumen}</div>`;
+    }).join('');
+  box.onclick = e=>{
+    const b = e.target.closest('.chip');
+    if(!b || b.disabled) return;
+    const p = diasNaProys[+b.dataset.p], w = +b.dataset.w, key = normProy(p);
+    if(b.dataset.kind==='hab'){
+      const set = new Set(STATE.habituales[key]||[]);
+      if(set.has(w)) set.delete(w); else set.add(w);
+      const arr = Array.from(set).sort((a,b)=>a-b);
+      if(arr.length) STATE.habituales[key] = arr; else STATE.habituales[key] = [];
+    } else {
+      const fechas2 = fechasSemana(), d = fechas2[w];
+      if(!d) return;
+      const nuevo = !esNAsemana(p, w, fechas2);
+      const base = habitualesDe(p).indexOf(w) >= 0;
+      const k = key+'|'+toISO(d);
+      if(nuevo===base) delete STATE.excepciones[k]; else STATE.excepciones[k] = nuevo;
+    }
+    saveState(); renderDiasNA();
+  };
+}
+
+/* Ajusta la plantilla según los días elegidos (0=Lunes ... 6=Domingo):
+   - Día NA: escribe NA en todas las celdas vacías de ese día (requerimientos y cuadro de firmas).
+   - Día que aplica: quita los NA sueltos de la plantilla, pero solo donde ese turno (TA/TB/TC)
+     está en blanco de lunes a viernes. Los NA propios del formulario (filas que nunca aplican,
+     turno C del consultorio, etc.) no se tocan. */
+function aplicarNA(xml, naSet){
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  if(doc.getElementsByTagName('parsererror').length) throw new Error('No se pudo leer la plantilla para marcar los NA.');
+  const hijos = (el,n)=>Array.prototype.filter.call(el.childNodes, x=>x.nodeType===1 && x.namespaceURI===WNS && x.localName===n);
+  const texto = el=>Array.prototype.map.call(el.getElementsByTagNameNS(WNS,'t'), t=>t.textContent).join('').trim();
+  const crear = n=>doc.createElementNS(WNS, 'w:'+n);
+  const tbl = doc.getElementsByTagNameNS(WNS,'tbl')[0];
+  if(!tbl) throw new Error('La plantilla no tiene la tabla esperada.');
+  const celdas = tr=>{
+    let col = 0;
+    return hijos(tr,'tc').map(tc=>{
+      const pr = hijos(tc,'tcPr')[0]; let gs = 1;
+      if(pr){ const g = hijos(pr,'gridSpan')[0]; if(g) gs = parseInt(g.getAttributeNS(WNS,'val'),10) || 1; }
+      const o = {tc:tc, col:col, gs:gs, text:texto(tc)}; col += gs; return o;
+    });
+  };
+  const cel = hijos(tbl,'tr').map(celdas);
+  const tieneDias = cs=>['Lunes','Martes','Domingo'].every(n=>cs.some(c=>c.text===n));
+  function ponerNA(tc, turno){
+    const p = hijos(tc,'p')[0]; if(!p) return;
+    const sz = turno ? '16' : '12';
+    const r = crear('r'), rpr = crear('rPr'), f = crear('rFonts');
+    f.setAttributeNS(WNS,'w:ascii','Times New Roman'); rpr.appendChild(f);
+    rpr.appendChild(crear('b')); rpr.appendChild(crear('bCs'));
+    const s1 = crear('sz'); s1.setAttributeNS(WNS,'w:val',sz); rpr.appendChild(s1);
+    const s2 = crear('szCs'); s2.setAttributeNS(WNS,'w:val',sz); rpr.appendChild(s2);
+    r.appendChild(rpr);
+    const t = crear('t'); t.textContent = 'NA'; r.appendChild(t);
+    p.appendChild(r);
+    if(turno){
+      const ppr = hijos(p,'pPr')[0];
+      if(ppr && !hijos(ppr,'jc')[0]){
+        const jc = crear('jc'); jc.setAttributeNS(WNS,'w:val','center');
+        const rp = hijos(ppr,'rPr')[0];
+        if(rp) ppr.insertBefore(jc, rp); else ppr.appendChild(jc);
+      }
+    }
+  }
+  function limpiar(tc){
+    hijos(tc,'p').forEach(p=>hijos(p,'r').forEach(r=>p.removeChild(r)));
+  }
+  let n = 0, c = 0;
+  const hdr = cel.findIndex(tieneDias);
+  if(hdr < 0) throw new Error('No se encontraron los días en la plantilla.');
+  const rango = [];
+  DIAS.forEach((nm,w)=>{ const x = cel[hdr].find(x=>x.text===nm); rango[w] = [x.col, x.col+x.gs-1]; });
+  const fin = cel.findIndex((cs,i)=>i>hdr && cs.some(x=>x.text.indexOf('Firma trabajadora')===0));
+  if(fin < 0) throw new Error('No se encontró el final de la tabla de requerimientos.');
+  for(let r=hdr+1; r<fin; r++){
+    const cs = cel[r];
+    if(cs.some(x=>/^TA\b/.test(x.text))) continue;
+    const dia = rango.map(rg=>cs.filter(x=>x.col>=rg[0] && x.col<=rg[1]));
+    // turnos que la plantilla marca NA de lunes a viernes (intencionales)
+    const k3 = dia[0].length;
+    const baseNA = [];
+    for(let k=0;k<k3;k++){
+      let cuenta = 0, comp = 0;
+      for(let w=0; w<5; w++){ if(dia[w].length===k3){ comp++; if(dia[w][k].text==='NA') cuenta++; } }
+      baseNA[k] = comp>0 && cuenta*2 > comp;
+    }
+    for(let w=0; w<7; w++){
+      dia[w].forEach((x,k)=>{
+        if(naSet.has(w)){
+          if(x.text===''){ ponerNA(x.tc,false); n++; }
+        } else if(x.text==='NA' && dia[w].length===k3 && !baseNA[k]){
+          limpiar(x.tc); c++;
+        }
+      });
+    }
+  }
+  const hT = cel.findIndex((cs,i)=>i>fin && tieneDias(cs));
+  if(hT >= 0){
+    const colDia = {};
+    DIAS.forEach((nm,w)=>{ const x = cel[hT].find(x=>x.text===nm); if(x) colDia[w] = x.col; });
+    let finT = cel.findIndex((cs,i)=>i>hT && cs.some(x=>x.text.indexOf('Aclaraciones')===0));
+    if(finT < 0) finT = cel.length;
+    for(let r=hT+1; r<finT; r++){
+      const cs = cel[r];
+      if(!cs.length || !/^[ABC]$/.test(cs[0].text)) continue;
+      naSet.forEach(w=>{
+        const x = cs.find(x=>x.col===colDia[w]);
+        if(x && x.text===''){ ponerNA(x.tc,true); n++; }
+      });
+    }
+  }
+  let out = new XMLSerializer().serializeToString(doc);
+  if(!/^<\?xml/.test(out)) out = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + out;
+  return {xml: out, n: n, c: c};
+}
+
 /* ---------- RENDER APP ---------- */
 function esc(s){
   if(s===undefined||s===null) return "";
@@ -198,6 +434,11 @@ function renderApp(){
       </div>
       <label>Proyecto (por defecto)</label><input type="text" id="f_proy" value="${esc(p.proyecto)}">
       <label>Encargado(a) de Proyecto (por defecto)</label><input type="text" id="f_enc" value="${esc(p.encargado)}">
+    </div>
+
+    <div class="card" id="diasNaCard">
+      <h2>Días que no aplican</h2>
+      <div id="diasNaBox"></div>
     </div>
 
     <div class="card">
@@ -223,8 +464,11 @@ function renderApp(){
   document.getElementById('f_mes').onchange = e=>{STATE.periodo.mes=e.target.value; saveState();};
   document.getElementById('f_anio').onchange = e=>{STATE.periodo.anio=parseInt(e.target.value)||STATE.periodo.anio; saveState();};
   document.getElementById('f_ini').onchange = e=>{STATE.periodo.fechaInicioISO=e.target.value; saveState();};
+  document.getElementById('f_ini').oninput = e=>{STATE.periodo.fechaInicioISO=e.target.value; renderDiasNA();};
   document.getElementById('f_fin').onchange = e=>{STATE.periodo.fechaFinalISO=e.target.value; saveState();};
+  document.getElementById('f_fin').oninput = e=>{STATE.periodo.fechaFinalISO=e.target.value; renderDiasNA();};
   document.getElementById('f_proy').onchange = e=>{STATE.periodo.proyecto=e.target.value; saveState();};
+  document.getElementById('f_proy').oninput = e=>{STATE.periodo.proyecto=e.target.value; renderDiasNA();};
   document.getElementById('f_enc').onchange = e=>{STATE.periodo.encargado=e.target.value; saveState();};
   document.getElementById('btnAdd').onclick = ()=>{
     STATE.locs.push({generar:"SI",archivo:"Nueva_locacion",tipo:"Banos_Hombres",proyecto:"",encargado:"",area:"Nueva locación"});
@@ -236,6 +480,7 @@ function renderApp(){
   document.getElementById('btnGenerar').onclick = generarBitacoras;
 
   renderLocList();
+  renderDiasNA();
 }
 
 function renderLocList(){
@@ -260,15 +505,30 @@ function renderLocList(){
         <div><label>Proyecto (si difiere del general)</label><input type="text" class="l-proy" data-idx="${idx}" value="${esc(loc.proyecto)}" placeholder="usa el general"></div>
         <div><label>Encargado (si difiere)</label><input type="text" class="l-enc" data-idx="${idx}" value="${esc(loc.encargado)}" placeholder="usa el general"></div>
       </div>
+      <details class="extradias" data-idx="${idx}">
+        <summary>Días distintos en esta locación${nCambios(loc)?' ('+nCambios(loc)+')':''}</summary>
+        <div class="chips" style="margin-top:8px">${DIAS_CORTO.map((nm,w)=>chipLoc(loc,idx,w)).join('')}</div>
+        <div class="hint">Toca un día para cambiarlo solo en esta locación. Igual: sale como el proyecto. NA o Aplica: lo que tú elijas.</div>
+      </details>
     </div>`;
   });
   listEl.innerHTML = html || '<div class="hint">Sin locaciones. Agregá una o importá el Excel.</div>';
 
-  listEl.querySelectorAll('.l-gen').forEach(el=>el.onchange=e=>{STATE.locs[e.target.dataset.idx].generar = e.target.checked?'SI':'NO'; saveState(); updateCounter();});
+  listEl.querySelectorAll('.l-gen').forEach(el=>el.onchange=e=>{STATE.locs[e.target.dataset.idx].generar = e.target.checked?'SI':'NO'; saveState(); updateCounter(); renderDiasNA();});
   listEl.querySelectorAll('.l-archivo').forEach(el=>el.onchange=e=>{STATE.locs[e.target.dataset.idx].archivo = e.target.value; saveState();});
   listEl.querySelectorAll('.l-tipo').forEach(el=>el.onchange=e=>{STATE.locs[e.target.dataset.idx].tipo = e.target.value; saveState();});
   listEl.querySelectorAll('.l-area').forEach(el=>el.onchange=e=>{STATE.locs[e.target.dataset.idx].area = e.target.value; saveState();});
-  listEl.querySelectorAll('.l-proy').forEach(el=>el.onchange=e=>{STATE.locs[e.target.dataset.idx].proyecto = e.target.value; saveState();});
+  listEl.querySelectorAll('.l-proy').forEach(el=>{ el.onchange=e=>{STATE.locs[e.target.dataset.idx].proyecto = e.target.value; saveState();}; el.oninput=e=>{STATE.locs[e.target.dataset.idx].proyecto = e.target.value; renderDiasNA();}; });
+  const onDiaLoc = e=>{
+    const b = e.currentTarget, idx = b.dataset.idx, loc = STATE.locs[idx], w = +b.dataset.w;
+    pasarEstadoLoc(loc, w);
+    b.outerHTML = chipLoc(loc, +idx, w);
+    const det = listEl.querySelector('details.extradias[data-idx="'+idx+'"]');
+    det.querySelector('summary').textContent = 'Días distintos en esta locación' + (nCambios(loc) ? ' ('+nCambios(loc)+')' : '');
+    det.querySelectorAll('.l-dia').forEach(x=>x.onclick = onDiaLoc);
+    saveState();
+  };
+  listEl.querySelectorAll('.l-dia').forEach(el=>el.onclick = onDiaLoc);
   listEl.querySelectorAll('.l-enc').forEach(el=>el.onchange=e=>{STATE.locs[e.target.dataset.idx].encargado = e.target.value; saveState();});
   listEl.querySelectorAll('.l-del').forEach(el=>el.onclick=e=>{
     const idx = e.target.dataset.idx;
@@ -378,11 +638,16 @@ async function generarBitacoras(){
   statusEl.className='status loading'; statusEl.textContent='Generando documentos...';
   try{
     const zip = new JSZip();
+    let conNA = 0;
     for(const loc of seleccion){
       const b64 = TEMPLATES_B64[loc.tipo];
       if(!b64){ console.warn('Tipo de plantilla no encontrado:', loc.tipo); continue; }
       const bytes = b64ToBytes(b64);
       const pzip = new PizZip(bytes);
+      const naSet = diasNAde(loc);
+      const res = aplicarNA(pzip.file('word/document.xml').asText(), naSet);
+      pzip.file('word/document.xml', res.xml);
+      if(naSet.size) conNA++;
       const doc = new window.docxtemplater(pzip, {paragraphLoop:true, linebreaks:true});
       doc.render({
         mes: p.mes,
@@ -401,7 +666,7 @@ async function generarBitacoras(){
     const zipName = `Bitacoras_${isoToDDMMYYYY(p.fechaInicioISO)}_al_${isoToDDMMYYYY(p.fechaFinalISO)}.zip`.replace(/\//g,"-").replace(/\s+/g,"_");
     saveAs(zipBlob, zipName);
     statusEl.className='status ok';
-    statusEl.textContent = `Listo: ${seleccion.length} documento(s) generado(s) en ${zipName}.`;
+    statusEl.textContent = `Listo: ${seleccion.length} documento(s) generado(s) en ${zipName}.` + (conNA ? ` Con días NA marcados en ${conNA}.` : ' Todos los días aplican.');
   }catch(e){
     console.error(e);
     statusEl.className='status err';
